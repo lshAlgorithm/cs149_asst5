@@ -7,6 +7,7 @@
 #include <omp.h>
 #include <vector>
 // #define VERBOSE
+
 #include "../common/CycleTimer.h"
 #include "../common/graph.h"
 
@@ -35,7 +36,7 @@ void top_down_step(
     int* node_to_add = (int *)malloc(sizeof(int) * g->num_nodes);
     int cnt = 0;
 
-    #pragma omp for schedule(dynamic, 256)
+    #pragma omp for schedule(guided)
     for (int i=0; i<frontier->count; i++) {
 
         int node = frontier->vertices[i];
@@ -50,17 +51,20 @@ void top_down_step(
             int outgoing = g->outgoing_edges[neighbor];
 
             if (distances[outgoing] == NOT_VISITED_MARKER && __sync_bool_compare_and_swap(distances + outgoing, NOT_VISITED_MARKER, distances[node] + 1)) {
+                // This `++` is NOT shared
                 node_to_add[cnt++] = outgoing;
             }
         }
     }
 
     if (cnt > 0) {
+        // Every thread will run this for reduction, and it seems to be atomatic.
+        // I guess it is because the `cnt` is an independent variable specified in `if`
         int offset = __sync_fetch_and_add(&new_frontier->count, cnt);
         memcpy(new_frontier->vertices + offset, node_to_add, sizeof(int) * cnt);
     }
 
-    // free(node_to_add);
+    free(node_to_add);
 }
 
 // Implements top-down BFS.
@@ -85,9 +89,8 @@ void bfs_top_down(Graph graph, solution* sol) {
     frontier->vertices[frontier->count++] = ROOT_NODE_ID;
     sol->distances[ROOT_NODE_ID] = 0;
 
-    #pragma parallel
+    #pragma omp parallel
     {
-        printf("The thread is %d\t", omp_get_thread_num());
         while (frontier->count != 0) {
 
     #ifdef VERBOSE
@@ -121,6 +124,9 @@ void bottom_up_step(
     int* distances,
     std::vector<bool>& is_frontier)
 {
+    int cnt = 0;
+    int* node_to_add = (int *)malloc(sizeof(int) * g->num_nodes);
+
     #pragma omp for schedule(guided)
     for (int v = 0; v < g->num_nodes; ++v) {
         if (distances[v] != NOT_VISITED_MARKER) continue;
@@ -132,16 +138,19 @@ void bottom_up_step(
             if (is_frontier[node]) {
                 // printf("I loop in %d\t", v);
                 distances[v] = distances[node] + 1;
-
-                int idx;
-                #pragma omp atomic capture
-                idx = new_frontier->count++;
-                new_frontier->vertices[idx] = v;
+                node_to_add[cnt++] = v;
 
                 break;
             }
         }
     }
+
+    if (cnt > 0) {
+        int offset = __sync_fetch_and_add(&new_frontier->count, cnt);
+        memcpy(new_frontier->vertices + offset, node_to_add, cnt * sizeof(int));
+    }
+
+    free(node_to_add);
 }
 
 void bfs_bottom_up(Graph graph, solution* sol)
@@ -200,9 +209,10 @@ void bfs_bottom_up(Graph graph, solution* sol)
                 vertex_set* tmp = frontier;
                 frontier = new_frontier;
                 new_frontier = tmp;
-                std::fill(is_frontier.begin(), is_frontier.end(), false);
+                // std::fill(is_frontier.begin(), is_frontier.end(), false);
             }
             
+            // Dynamic strategy comes with overheads of waiting for new value of the loop variable
             #pragma omp for schedule(static)
             for (int i = 0; i < frontier->count; ++i) {
                 is_frontier[frontier->vertices[i]] = true;
@@ -217,5 +227,61 @@ void bfs_hybrid(Graph graph, solution* sol)
     //
     // You will need to implement the "hybrid" BFS here as
     // described in the handout.
-    
+    std::vector<bool> is_frontier(graph->num_nodes, false);
+
+    vertex_set list1;
+    vertex_set list2;
+    vertex_set_init(&list1, graph->num_nodes);
+    vertex_set_init(&list2, graph->num_nodes);
+
+    vertex_set* frontier = &list1;
+    vertex_set* new_frontier = &list2;
+
+    // initialize all nodes to NOT_VISITED
+    for (int i=0; i<graph->num_nodes; i++)
+        sol->distances[i] = NOT_VISITED_MARKER;
+
+    // setup frontier with the root node
+    frontier->vertices[frontier->count++] = ROOT_NODE_ID;
+    sol->distances[ROOT_NODE_ID] = 0;
+    is_frontier[ROOT_NODE_ID] = true;
+
+    #pragma omp parallel
+    {
+        while (frontier->count != 0) {
+
+    #ifdef VERBOSE
+            double start_time = CycleTimer::currentSeconds();
+    #endif
+            #pragma omp single
+            vertex_set_clear(new_frontier);
+            
+            if (static_cast<double>(new_frontier->count) < static_cast<double>(graph->num_nodes) * 0.03)
+                top_down_step(graph, frontier, new_frontier, sol->distances);
+            else
+                bottom_up_step(graph, frontier, new_frontier, sol->distances, is_frontier);
+
+    #ifdef VERBOSE
+        double end_time = CycleTimer::currentSeconds();
+        printf("frontier=%-10d %.4f sec\n", frontier->count, end_time - start_time);
+    #endif
+
+            // swap pointers
+            #pragma omp single 
+            {
+                vertex_set* tmp = frontier;
+                frontier = new_frontier;
+                new_frontier = tmp;
+
+                // We don't NEED to clear it, think yourself
+                // std::fill(is_frontier.begin(), is_frontier.end(), false);
+            }
+            
+            // Dynamic strategy comes with overheads of waiting for new value of the loop variable
+            #pragma omp for schedule(static)
+            for (int i = 0; i < frontier->count; ++i) {
+                is_frontier[frontier->vertices[i]] = true;
+            }
+        }
+    }
 }
