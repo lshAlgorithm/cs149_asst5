@@ -31,7 +31,10 @@ void top_down_step(
     vertex_set* new_frontier,
     int* distances)
 {
+    // int* node_to_add = (int *)malloc(sizeof(int) * g->num_nodes);
+    // int cnt = 0;
 
+    #pragma omp paralle for schedule(guided)
     for (int i=0; i<frontier->count; i++) {
 
         int node = frontier->vertices[i];
@@ -45,13 +48,22 @@ void top_down_step(
         for (int neighbor=start_edge; neighbor<end_edge; neighbor++) {
             int outgoing = g->outgoing_edges[neighbor];
 
-            if (distances[outgoing] == NOT_VISITED_MARKER) {
-                distances[outgoing] = distances[node] + 1;
-                int index = new_frontier->count++;
+            if (distances[outgoing] == NOT_VISITED_MARKER && __sync_bool_compare_and_swap(distances + outgoing, NOT_VISITED_MARKER, distances[node] + 1)) {
+                int index;
+                #pragma omp atomic capture
+                index = new_frontier->count++;
                 new_frontier->vertices[index] = outgoing;
+                // node_to_add[cnt++] = outgoing;
             }
         }
     }
+
+    // if (cnt > 0) {
+    //     int offset = __sync_fetch_and_add(&new_frontier->count, cnt);
+    //     memcpy(new_frontier->vertices + offset, node_to_add, sizeof(int) * cnt);
+    // }
+
+    // free(node_to_add);
 }
 
 // Implements top-down BFS.

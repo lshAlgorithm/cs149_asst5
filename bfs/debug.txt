@@ -1,0 +1,38 @@
+rm -rf bfs_grader bfs  *~ *.*~
+g++ -I../ -std=c++11 -fopenmp -O3 -g -o bfs main.cpp bfs.cpp ../common/graph.cpp ref_bfs.o
+g++ -I../ -std=c++11 -fopenmp -O3 -g -o bfs_grader grade.cpp bfs.cpp ../common/graph.cpp ref_bfs.o
+----------------------------------------------------------
+Max system threads = 12
+Running with 12 threads
+----------------------------------------------------------
+Loading graph...
+
+Graph stats:
+  Edges: 34
+  Nodes: 12
+Running with 12 threads
+In thread: 3, and the cnt == 0
+In thread: 3, and the cnt == 1
+In thread: 7, and the cnt == 0
+In thread: 7, and the cnt == 1
+In thread: 7, and the cnt == 2
+In thread: 7, and the cnt == 3
+In thread: 8, and the cnt == 0
+In thread: 8, and the cnt == 1
+In thread: 8, and the cnt == 2
+In thread: 11, and the cnt == 0
+In thread: 11, and the cnt == 1
+Testing Correctness of Top Down
+Testing Correctness of Bottom Up
+Testing Correctness of Hybrid
+Bottom Up Search is not Correct
+Hybrid Search is not Correct
+----------------------------------------------------------
+Your Code: Timing Summary
+Threads   Top Down    Bottom Up       Hybrid
+  12:         0.01         0.00         0.00
+----------------------------------------------------------
+Reference: Timing Summary
+Threads   Top Down    Bottom Up       Hybrid
+  12:         0.00         0.00         0.00
+----------------------------------------------------------
