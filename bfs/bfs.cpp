@@ -5,7 +5,8 @@
 #include <string.h>
 #include <cstddef>
 #include <omp.h>
-
+#include <vector>
+// #define VERBOSE
 #include "../common/CycleTimer.h"
 #include "../common/graph.h"
 
@@ -31,10 +32,10 @@ void top_down_step(
     vertex_set* new_frontier,
     int* distances)
 {
-    // int* node_to_add = (int *)malloc(sizeof(int) * g->num_nodes);
-    // int cnt = 0;
+    int* node_to_add = (int *)malloc(sizeof(int) * g->num_nodes);
+    int cnt = 0;
 
-    #pragma omp paralle for schedule(guided)
+    #pragma omp for schedule(dynamic, 256)
     for (int i=0; i<frontier->count; i++) {
 
         int node = frontier->vertices[i];
@@ -49,19 +50,15 @@ void top_down_step(
             int outgoing = g->outgoing_edges[neighbor];
 
             if (distances[outgoing] == NOT_VISITED_MARKER && __sync_bool_compare_and_swap(distances + outgoing, NOT_VISITED_MARKER, distances[node] + 1)) {
-                int index;
-                #pragma omp atomic capture
-                index = new_frontier->count++;
-                new_frontier->vertices[index] = outgoing;
-                // node_to_add[cnt++] = outgoing;
+                node_to_add[cnt++] = outgoing;
             }
         }
     }
 
-    // if (cnt > 0) {
-    //     int offset = __sync_fetch_and_add(&new_frontier->count, cnt);
-    //     memcpy(new_frontier->vertices + offset, node_to_add, sizeof(int) * cnt);
-    // }
+    if (cnt > 0) {
+        int offset = __sync_fetch_and_add(&new_frontier->count, cnt);
+        memcpy(new_frontier->vertices + offset, node_to_add, sizeof(int) * cnt);
+    }
 
     // free(node_to_add);
 }
@@ -88,25 +85,62 @@ void bfs_top_down(Graph graph, solution* sol) {
     frontier->vertices[frontier->count++] = ROOT_NODE_ID;
     sol->distances[ROOT_NODE_ID] = 0;
 
-    while (frontier->count != 0) {
+    #pragma parallel
+    {
+        printf("The thread is %d\t", omp_get_thread_num());
+        while (frontier->count != 0) {
 
-#ifdef VERBOSE
-        double start_time = CycleTimer::currentSeconds();
-#endif
+    #ifdef VERBOSE
+            double start_time = CycleTimer::currentSeconds();
+    #endif
+            #pragma omp single
+            vertex_set_clear(new_frontier);
 
-        vertex_set_clear(new_frontier);
+            top_down_step(graph, frontier, new_frontier, sol->distances);
 
-        top_down_step(graph, frontier, new_frontier, sol->distances);
+    #ifdef VERBOSE
+        double end_time = CycleTimer::currentSeconds();
+        printf("frontier=%-10d %.4f sec\n", frontier->count, end_time - start_time);
+    #endif
 
-#ifdef VERBOSE
-    double end_time = CycleTimer::currentSeconds();
-    printf("frontier=%-10d %.4f sec\n", frontier->count, end_time - start_time);
-#endif
+            // swap pointers
+            #pragma omp single
+            {
+                vertex_set* tmp = frontier;
+                frontier = new_frontier;
+                new_frontier = tmp;
+            }
+        }
+    }
+}
 
-        // swap pointers
-        vertex_set* tmp = frontier;
-        frontier = new_frontier;
-        new_frontier = tmp;
+void bottom_up_step(
+    Graph g,
+    vertex_set* frontier,
+    vertex_set* new_frontier,
+    int* distances,
+    std::vector<bool>& is_frontier)
+{
+    #pragma omp for schedule(guided)
+    for (int v = 0; v < g->num_nodes; ++v) {
+        if (distances[v] != NOT_VISITED_MARKER) continue;
+
+        int op = g->incoming_starts[v];
+        int ed = (v == g->num_nodes - 1) ? g->num_edges : g->incoming_starts[v + 1];
+        for (int u = op; u < ed; ++u) {
+            int node = g->incoming_edges[u];
+            if (is_frontier[node]) {
+                // printf("I loop in %d\t", v);
+                distances[v] = distances[node] + 1;
+
+                int idx;
+                #pragma omp atomic capture
+                idx = new_frontier->count++;
+                new_frontier->vertices[idx] = v;
+
+                break;
+            }
+        }
     }
 }
 
@@ -123,6 +157,58 @@ void bfs_bottom_up(Graph graph, solution* sol)
     // As was done in the top-down case, you may wish to organize your
     // code by creating subroutine bottom_up_step() that is called in
     // each step of the BFS process.
+
+    std::vector<bool> is_frontier(graph->num_nodes, false);
+
+    vertex_set list1;
+    vertex_set list2;
+    vertex_set_init(&list1, graph->num_nodes);
+    vertex_set_init(&list2, graph->num_nodes);
+
+    vertex_set* frontier = &list1;
+    vertex_set* new_frontier = &list2;
+
+    // initialize all nodes to NOT_VISITED
+    for (int i=0; i<graph->num_nodes; i++)
+        sol->distances[i] = NOT_VISITED_MARKER;
+
+    // setup frontier with the root node
+    frontier->vertices[frontier->count++] = ROOT_NODE_ID;
+    sol->distances[ROOT_NODE_ID] = 0;
+    is_frontier[ROOT_NODE_ID] = true;
+
+    #pragma omp parallel
+    {
+        while (frontier->count != 0) {
+
+    #ifdef VERBOSE
+            double start_time = CycleTimer::currentSeconds();
+    #endif
+            #pragma omp single
+            vertex_set_clear(new_frontier);
+
+            bottom_up_step(graph, frontier, new_frontier, sol->distances, is_frontier);
+
+    #ifdef VERBOSE
+        double end_time = CycleTimer::currentSeconds();
+        printf("frontier=%-10d %.4f sec\n", frontier->count, end_time - start_time);
+    #endif
+
+            // swap pointers
+            #pragma omp single 
+            {
+                vertex_set* tmp = frontier;
+                frontier = new_frontier;
+                new_frontier = tmp;
+                std::fill(is_frontier.begin(), is_frontier.end(), false);
+            }
+            
+            #pragma omp for schedule(static)
+            for (int i = 0; i < frontier->count; ++i) {
+                is_frontier[frontier->vertices[i]] = true;
+            }
+        }
+    }
 }
 
 void bfs_hybrid(Graph graph, solution* sol)
@@ -131,4 +217,5 @@ void bfs_hybrid(Graph graph, solution* sol)
     //
     // You will need to implement the "hybrid" BFS here as
     // described in the handout.
+    
 }
